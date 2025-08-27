@@ -4,3 +4,5 @@ websockets
 python-multipart
 pydantic
 python-dotenv
+celery
+redis
