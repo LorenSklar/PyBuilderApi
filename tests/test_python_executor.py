@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test suite for the Celery-based PythonExecutor
+Test suite for the multiprocessing-based PythonExecutor
 """
 
 import asyncio
@@ -9,33 +9,6 @@ import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from app.services.python_executor import PythonExecutor
-
-# Mock Celery for testing
-class MockCeleryTask:
-    def __init__(self, task_id="mock_task_123"):
-        self.id = task_id
-        self._ready = False
-        self._result = None
-    
-    def ready(self):
-        return self._ready
-    
-    def get(self):
-        return self._result
-    
-    def set_ready(self, ready=True):
-        self._ready = ready
-    
-    def set_result(self, result):
-        self._result = result
-
-class MockCeleryApp:
-    def __init__(self):
-        self.control = MockCeleryControl()
-
-class MockCeleryControl:
-    def revoke(self, task_id, terminate=True, signal='SIGKILL'):
-        pass
 
 class MockWebSocket:
     """Mock WebSocket for testing"""
@@ -84,20 +57,8 @@ class TestPythonExecutor:
         assert executor.timeout > 0
     
     @pytest.mark.asyncio
-    @patch('app.services.python_executor.execute_python_code')
-    async def test_simple_execution(self, mock_task_func, executor, websocket):
+    async def test_simple_execution(self, executor, websocket):
         """Test simple Python code execution"""
-        # Mock the Celery task
-        mock_task = MockCeleryTask()
-        mock_task.set_result({
-            'status': 'success',
-            'stdout': 'Hello, World!\n',
-            'stderr': '',
-            'exit_code': 0
-        })
-        mock_task.set_ready(True)
-        mock_task_func.delay.return_value = mock_task
-        
         code = 'print("Hello, World!")'
         
         await executor.execute_and_stream(code, websocket)
@@ -121,19 +82,8 @@ class TestPythonExecutor:
         assert stdout_msgs[0]["content"] == "Hello, World!"
     
     @pytest.mark.asyncio
-    @patch('app.services.python_executor.execute_python_code')
-    async def test_error_handling(self, mock_task_func, executor, websocket):
+    async def test_error_handling(self, executor, websocket):
         """Test execution with syntax errors"""
-        # Mock the Celery task with error
-        mock_task = MockCeleryTask()
-        mock_task.set_result({
-            'status': 'error',
-            'error': 'invalid syntax (<string>, line 1)',
-            'exit_code': 1
-        })
-        mock_task.set_ready(True)
-        mock_task_func.delay.return_value = mock_task
-        
         code = 'print("Hello" + )'  # Syntax error
         
         await executor.execute_and_stream(code, websocket)
@@ -147,19 +97,8 @@ class TestPythonExecutor:
         assert len(error_msgs) >= 1
     
     @pytest.mark.asyncio
-    @patch('app.services.python_executor.execute_python_code')
-    @patch('app.services.python_executor.celery_app')
-    async def test_timeout_handling(self, mock_celery_app, mock_task_func, executor, websocket):
+    async def test_timeout_handling(self, executor, websocket):
         """Test that infinite loops are properly timed out"""
-        # Mock the Celery app control methods
-        mock_control = MagicMock()
-        mock_celery_app.control = mock_control
-        
-        # Mock the Celery task that never completes
-        mock_task = MockCeleryTask()
-        mock_task.set_ready(False)  # Never ready
-        mock_task_func.delay.return_value = mock_task
-        
         code = '''
 import time
 while True:
@@ -185,65 +124,62 @@ while True:
         
         # Verify no active executions remain
         assert len(executor._active_executions) == 0
-        
-        # Verify that revoke was called
-        mock_control.revoke.assert_called_once()
     
     @pytest.mark.asyncio
-    @patch('app.services.python_executor.execute_python_code')
-    @patch('app.services.python_executor.celery_app')
-    async def test_stop_execution(self, mock_celery_app, mock_task_func, executor, websocket):
+    async def test_stop_execution(self, executor, websocket):
         """Test stopping an execution manually"""
-        # Mock the Celery app control methods
-        mock_control = MagicMock()
-        mock_celery_app.control = mock_control
+        # Create a new executor with a short timeout so we can manually stop it before it times out
+        test_executor = PythonExecutor(timeout=5)  # 5 second timeout
         
-        # Mock the Celery task
-        mock_task = MockCeleryTask()
-        mock_task.set_ready(False)  # Never ready
-        mock_task_func.delay.return_value = mock_task
-        
+        # Use a simple infinite loop that will run until stopped or timed out
         code = '''
 import time
-for i in range(100):
-    print(f"Line {i}")
-    time.sleep(0.1)
+print("Starting infinite loop...")
+i = 0
+while True:
+    print(f"Loop iteration {i}")
+    i += 1
+    time.sleep(0.1)  # Slower to ensure we can stop it
 '''
         
         # Start execution in background
         execution_task = asyncio.create_task(
-            executor.execute_and_stream(code, websocket)
+            test_executor.execute_and_stream(code, websocket)
         )
         
-        # Wait a bit for execution to start
-        await asyncio.sleep(0.1)
+        # Wait for execution to start and produce some output
+        await asyncio.sleep(0.3)
         
         # Get the execution ID from the start message
         start_msgs = websocket.get_messages_by_type("execution_start")
         assert len(start_msgs) == 1
         execution_id = start_msgs[0]["execution_id"]
         
+        # Verify execution is in the active executions list
+        assert execution_id in test_executor._active_executions, "Execution should be in active executions"
+        
+        # Verify we're getting output (execution is running)
+        stdout_msgs = websocket.get_messages_by_type("stdout")
+        assert len(stdout_msgs) > 0, "Execution should be producing output"
+        
         # Stop the execution
-        stop_result = await executor.stop_execution(execution_id)
+        stop_result = await test_executor.stop_execution(execution_id)
         assert stop_result is True
         
         # Wait for execution to complete
         await execution_task
         
         # Check that execution was stopped
-        assert len(executor._active_executions) == 0
-        
-        # Verify that revoke was called
-        mock_control.revoke.assert_called_once()
+        assert len(test_executor._active_executions) == 0
     
     def test_get_active_executions(self, executor):
-        """Test getting list of active executions"""
+        """Test getting list of active execution IDs"""
         # Should be empty initially
         assert executor.get_active_executions() == []
         
         # Add a mock execution
         executor._active_executions["test_id"] = {
-            'task_id': 'mock_task_123',
+            'process': None,
             'temp_file': '/tmp/test.py',
             'start_time': time.time(),
             'websocket': None
@@ -263,33 +199,10 @@ for i in range(100):
         assert result is False
     
     @pytest.mark.asyncio
-    @patch('app.services.python_executor.execute_python_code')
-    async def test_concurrent_executions(self, mock_task_func, executor):
+    async def test_concurrent_executions(self, executor):
         """Test multiple concurrent executions"""
         websocket1 = MockWebSocket()
         websocket2 = MockWebSocket()
-        
-        # Mock tasks for both executions
-        mock_task1 = MockCeleryTask("task1")
-        mock_task1.set_result({
-            'status': 'success',
-            'stdout': 'Execution 1\n',
-            'stderr': '',
-            'exit_code': 0
-        })
-        mock_task1.set_ready(True)
-        
-        mock_task2 = MockCeleryTask("task2")
-        mock_task2.set_result({
-            'status': 'success',
-            'stdout': 'Execution 2\n',
-            'stderr': '',
-            'exit_code': 0
-        })
-        mock_task2.set_ready(True)
-        
-        # Make the mock function return different tasks for different calls
-        mock_task_func.delay.side_effect = [mock_task1, mock_task2]
         
         code1 = 'print("Execution 1")'
         code2 = 'print("Execution 2")'

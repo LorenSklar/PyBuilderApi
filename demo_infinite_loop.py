@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Demo script showing how the Celery-based PythonExecutor handles infinite loops
+Demo script showing how the multiprocessing-based PythonExecutor handles infinite loops
 """
 
 import asyncio
@@ -83,15 +83,14 @@ print("Execution completed successfully!")
 
 async def main():
     """Run both demos"""
-    print("🎯 Celery-based PythonExecutor Demo")
+    print("🎯 Multiprocessing-based PythonExecutor Demo")
     print("This demonstrates how the system handles infinite loops and normal execution")
     print()
     
-    # Note: This demo requires Redis and Celery workers to be running
-    print("⚠️  NOTE: This demo requires:")
-    print("   - Redis server running")
-    print("   - Celery worker running")
-    print("   - See CELERY_SETUP.md for setup instructions")
+    print("✅ This demo works with the simple multiprocessing implementation!")
+    print("   - No Redis required")
+    print("   - No Celery workers needed")
+    print("   - Just pure Python multiprocessing")
     print()
     
     try:
@@ -99,7 +98,6 @@ async def main():
         await demo_infinite_loop()
     except Exception as e:
         print(f"❌ Demo failed: {e}")
-        print("Make sure Redis and Celery workers are running!")
 
 if __name__ == "__main__":
     asyncio.run(main())
